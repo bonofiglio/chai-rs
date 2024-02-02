@@ -137,35 +137,20 @@ impl Chai {
         Ok(line)
     }
 
-    fn _get_last_line(&self) -> anyhow::Result<&Rope> {
-        let buffer = self.get_current_buffer()?;
-        let last_line = buffer
-            .content
-            .last()
-            .ok_or(anyhow::anyhow!("No lines found"))?;
-
-        Ok(last_line)
-    }
-
-    fn get_last_line_mut(&mut self) -> anyhow::Result<&mut Rope> {
-        let buffer = self.get_current_buffer_mut()?;
-        let last_line = buffer
-            .content
-            .last_mut()
-            .ok_or(anyhow::anyhow!("No lines found"))?;
-
-        Ok(last_line)
-    }
-
     fn get_cursor_pos(&self) -> anyhow::Result<(usize, usize)> {
         let buffer = self.get_current_buffer()?;
+        let raw_pos = buffer.cursor.get_pos();
 
-        Ok(buffer.cursor.get_pos())
+        let line = self.get_line_at(raw_pos.1)?;
+
+        let x = raw_pos.0.min(line.len_chars());
+
+        Ok((x, raw_pos.1))
     }
 
     fn get_term_cursor_pos(&self) -> anyhow::Result<(usize, usize)> {
+        let (x, y) = self.get_cursor_pos()?;
         let buffer = self.get_current_buffer()?;
-        let (x, y) = buffer.cursor.get_pos();
 
         let x = x.saturating_sub(buffer.offset.0);
         let y = y.saturating_sub(buffer.offset.1);
@@ -252,13 +237,37 @@ impl Chai {
                 self.add_char(c)?;
 
                 let cursor_position = self.get_cursor_pos()?;
-                self.set_cursor_pos(cursor_position.0 + 1, cursor_position.1)?;
+                self.set_cursor_x(cursor_position.0 + 1)?;
             }
             (KeyModifiers::NONE, KeyCode::Enter) => {
                 self.new_line()?;
             }
             (KeyModifiers::NONE, KeyCode::Backspace) => {
                 self.delete()?;
+            }
+            (KeyModifiers::NONE, KeyCode::Left) => {
+                let cursor_position = self.get_cursor_pos()?;
+
+                self.set_cursor_x(cursor_position.0.saturating_sub(1))?;
+            }
+            (KeyModifiers::NONE, KeyCode::Right) => {
+                let cursor_position = self.get_cursor_pos()?;
+                let line = self.get_line_at(cursor_position.1)?;
+
+                self.set_cursor_x((cursor_position.0 + 1).min(line.len_chars()))?;
+            }
+            (KeyModifiers::NONE, KeyCode::Up) => {
+                let cursor_position = self.get_cursor_pos()?;
+                let new_cursor_y = cursor_position.1.saturating_sub(1);
+
+                self.set_cursor_y(new_cursor_y)?;
+            }
+            (KeyModifiers::NONE, KeyCode::Down) => {
+                let cursor_position = self.get_cursor_pos()?;
+                let lines_len = self.get_current_buffer()?.content.len();
+                let new_cursor_y = (cursor_position.1 + 1).min(lines_len - 1);
+
+                self.set_cursor_y(new_cursor_y)?;
             }
             _ => {}
         };
@@ -267,29 +276,26 @@ impl Chai {
     }
 
     fn add_char(&mut self, c: char) -> anyhow::Result<()> {
-        let (cursor_index, _) = self.get_cursor_pos()?;
+        let (cursor_index, line_index) = self.get_cursor_pos()?;
 
-        let last_line = self.get_last_line_mut()?;
+        let last_line = self.get_line_at_mut(line_index)?;
 
         last_line.try_insert_char(cursor_index, c)?;
 
         Ok(())
     }
 
-    fn _add_str(&mut self, s: &str) -> anyhow::Result<()> {
-        let (cursor_index, _) = self.get_cursor_pos()?;
-
-        let last_line = self.get_last_line_mut()?;
-        last_line.try_insert(cursor_index, s)?;
+    fn set_cursor_y(&mut self, y: usize) -> anyhow::Result<()> {
+        let buffer = self.get_current_buffer_mut()?;
+        buffer.cursor.y = y;
 
         Ok(())
     }
 
-    fn set_cursor_pos(&mut self, x: usize, y: usize) -> anyhow::Result<()> {
+    fn set_cursor_x(&mut self, x: usize) -> anyhow::Result<()> {
         let buffer = self.get_current_buffer_mut()?;
 
         buffer.cursor.x = x;
-        buffer.cursor.y = y;
 
         Ok(())
     }
@@ -309,20 +315,20 @@ impl Chai {
         let (cursor_index, _) = self.get_cursor_pos()?;
         let (cursor_x, cursor_y) = self.get_cursor_pos()?;
 
-        let (_, new_cursor_y) = self.subtract_cursor_pos()?;
+        let (mut new_cursor_x, new_cursor_y) = self.subtract_cursor_pos()?;
 
         if cursor_x > 0 {
-            let last_line = self.get_last_line_mut()?;
+            let last_line = self.get_line_at_mut(cursor_y)?;
             last_line.try_remove(cursor_index.saturating_sub(1)..cursor_index)?;
         };
 
         if new_cursor_y < cursor_y {
+            new_cursor_x = self.get_line_at(new_cursor_y)?.len_chars();
             self.append_to_prev_line()?;
         }
 
-        let new_cursor_x = self.get_line_at(new_cursor_y)?.len_chars();
-
-        self.set_cursor_pos(new_cursor_x, new_cursor_y)?;
+        self.set_cursor_x(new_cursor_x)?;
+        self.set_cursor_y(new_cursor_y)?;
         Ok(())
     }
 
