@@ -13,7 +13,9 @@ impl Cursor {
 }
 
 fn main() -> anyhow::Result<()> {
-    let result = chai::Chai::new().start();
+    let file_path = std::env::args().nth(1).map(String::into_boxed_str);
+
+    let result = chai::Chai::new(file_path)?.start();
 
     result
 }

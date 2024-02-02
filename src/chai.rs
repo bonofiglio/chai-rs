@@ -35,14 +35,22 @@ impl Drop for Chai {
 }
 
 impl Chai {
-    pub fn new() -> Self {
-        Chai {
+    pub fn new(file_path: Option<Box<str>>) -> anyhow::Result<Self> {
+        let content = match file_path {
+            Some(ref path) => String::from_utf8(std::fs::read(path.as_ref())?)?
+                .lines()
+                .map(Rope::from)
+                .collect(),
+            None => vec![Rope::new()],
+        };
+
+        Ok(Chai {
             writer: io::stdout(),
             buffers: vec![Buffer {
-                file_path: None,
+                file_path,
                 cursor: Cursor { x: 0, y: 0 },
                 dirty: false,
-                content: vec![Rope::new()],
+                content,
                 offset: (0, 0),
             }],
             current_buffer_index: 0,
@@ -50,7 +58,7 @@ impl Chai {
                 width: 0,
                 height: 0,
             },
-        }
+        })
     }
 
     pub fn start(mut self) -> anyhow::Result<()> {
@@ -62,6 +70,11 @@ impl Chai {
             width: (size.columns as usize).saturating_sub(1),
             height: size.rows as usize,
         };
+
+        self.clear()?;
+        self.render()?;
+        queue!(self.writer, cursor::MoveTo(0, 0))?;
+        self.writer.flush()?;
 
         let result = self.run_loop();
 
