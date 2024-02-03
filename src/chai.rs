@@ -168,18 +168,23 @@ impl Chai {
             return Ok(());
         };
 
-        let slices = buffer.content.iter().skip(buffer.offset.1).map(|l| {
-            l.get_slice(
-                buffer.offset.0..(buffer.offset.0 + self.window_size.width).min(l.len_chars()),
-            )
-            .map(|s| s.as_str().unwrap_or(""))
-        });
+        let slices = buffer
+            .content
+            .iter()
+            .skip(buffer.offset.1)
+            .map(|l| {
+                l.get_slice(
+                    buffer.offset.0..(buffer.offset.0 + self.window_size.width).min(l.len_chars()),
+                )
+                .map(|s| s.as_str().unwrap_or(""))
+            })
+            .take(self.window_size.height);
 
         let len = slices.len();
 
         for (i, slice) in slices.enumerate() {
             queue!(&mut self.writer, Print(slice.unwrap_or("")))?;
-            if i < len - 1 {
+            if i < len.saturating_sub(1) {
                 queue!(&mut self.writer, Print("\n\r"))?;
             }
         }
@@ -192,8 +197,16 @@ impl Chai {
         let (window_width, window_height) = (self.window_size.width, self.window_size.height);
         let buffer = self.get_current_buffer_mut()?;
 
+        // When the cursor_y - offset_y is greater than window_height - 1, add one to the offset_y
+        if cursor_y.saturating_sub(buffer.offset.1) > window_height.saturating_sub(1) {
+            buffer.offset.1 += 1;
+        }
+        // When the cursor_y - offset_y is less than 0, subtract one from the offset_y
+        if (cursor_y + 1).saturating_sub(buffer.offset.1) == 0 {
+            buffer.offset.1 = buffer.offset.1.saturating_sub(1);
+        }
+
         buffer.offset.0 = cursor_x.saturating_sub(window_width);
-        buffer.offset.1 = cursor_y.saturating_sub(window_height);
 
         Ok(())
     }
@@ -265,7 +278,7 @@ impl Chai {
             (KeyModifiers::NONE, KeyCode::Down) => {
                 let cursor_position = self.get_cursor_pos()?;
                 let lines_len = self.get_current_buffer()?.content.len();
-                let new_cursor_y = (cursor_position.1 + 1).min(lines_len - 1);
+                let new_cursor_y = (cursor_position.1 + 1).min(lines_len.saturating_sub(1));
 
                 self.set_cursor_y(new_cursor_y)?;
             }
