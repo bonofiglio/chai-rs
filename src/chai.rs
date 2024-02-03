@@ -10,7 +10,7 @@ use crossterm::{
 };
 use ropey::Rope;
 
-use crate::{buffer::Buffer, Cursor};
+use crate::{buffer::Buffer, core::extended_linked_list::ExtendedLinkedList, Cursor};
 use std::{
     io::{self, Write},
     process::exit,
@@ -37,11 +37,13 @@ impl Drop for Chai {
 impl Chai {
     pub fn new(file_path: Option<Box<str>>) -> anyhow::Result<Self> {
         let content = match file_path {
-            Some(ref path) => String::from_utf8(std::fs::read(path.as_ref())?)?
-                .lines()
-                .map(Rope::from)
-                .collect(),
-            None => vec![Rope::new()],
+            Some(ref path) => ExtendedLinkedList::from_vec(
+                String::from_utf8(std::fs::read(path.as_ref())?)?
+                    .lines()
+                    .map(Rope::from)
+                    .collect::<Vec<_>>(),
+            ),
+            None => ExtendedLinkedList::from([Rope::new()]),
         };
 
         Ok(Chai {
@@ -314,12 +316,21 @@ impl Chai {
     }
 
     fn new_line(&mut self) -> anyhow::Result<()> {
+        let (cursor_x, cursor_y) = self.get_cursor_pos()?;
+        let line = self.get_line_at_mut(cursor_y)?;
+
+        let new_line = if cursor_x < line.len_chars() {
+            line.try_split_off(cursor_x)?
+        } else {
+            Rope::new()
+        };
+
         let buffer = self.get_current_buffer_mut()?;
 
         buffer.cursor.y += 1;
         buffer.cursor.x = 0;
 
-        buffer.content.push(Rope::new());
+        buffer.content.push_at(cursor_y + 1, new_line);
 
         Ok(())
     }
@@ -351,15 +362,18 @@ impl Chai {
         match cursor_position {
             (0, 0) => {}
             (0, y) => {
-                cursor_position.0 = self.get_line_len(y - 1).unwrap_or(0).saturating_sub(1);
-                cursor_position.1 = y - 1;
+                cursor_position.0 = self
+                    .get_line_len(y.saturating_sub(1))
+                    .unwrap_or(0)
+                    .saturating_sub(1);
+                cursor_position.1 = y.saturating_sub(1);
             }
             (x, 0) => {
-                cursor_position.0 = x - 1;
+                cursor_position.0 = x.saturating_sub(1);
                 cursor_position.1 = 0;
             }
             (x, y) => {
-                cursor_position.0 = x - 1;
+                cursor_position.0 = x.saturating_sub(1);
                 cursor_position.1 = y;
             }
         };
@@ -381,8 +395,11 @@ impl Chai {
             return Ok(());
         }
 
-        let removed_line = buffer.content.remove(cursor_y);
-        let prev_line = self.get_line_at_mut(cursor_y - 1)?;
+        let removed_line = buffer.content.remove_at(cursor_y).ok_or(anyhow::anyhow!(
+            "Could not remove line at index {}",
+            cursor_y
+        ))?;
+        let prev_line = self.get_line_at_mut(cursor_y.saturating_sub(1))?;
 
         prev_line.append(removed_line);
 

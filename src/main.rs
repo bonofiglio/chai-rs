@@ -1,5 +1,6 @@
 mod buffer;
 mod chai;
+mod core;
 
 struct Cursor {
     pub x: usize,
