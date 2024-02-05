@@ -50,3 +50,9 @@ impl<T> ExtendedLinkedList<T> {
         self.0.iter_mut().nth(index)
     }
 }
+
+impl<T> FromIterator<T> for ExtendedLinkedList<T> {
+    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        Self(iter.into_iter().collect())
+    }
+}

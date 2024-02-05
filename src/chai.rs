@@ -2,7 +2,6 @@ use crossterm::{
     cursor,
     event::{read, Event, KeyCode, KeyEvent, KeyModifiers},
     execute, queue,
-    style::Print,
     terminal::{
         disable_raw_mode, enable_raw_mode, window_size, Clear, ClearType, EnterAlternateScreen,
         LeaveAlternateScreen,
@@ -10,21 +9,28 @@ use crossterm::{
 };
 use ropey::Rope;
 
-use crate::{buffer::Buffer, core::extended_linked_list::ExtendedLinkedList, Cursor};
+use crate::{
+    buffer::Buffer,
+    components::{text_block::TextBlock, TUIComponent},
+    core::extended_linked_list::ExtendedLinkedList,
+};
 use std::{
     io::{self, Write},
     process::exit,
 };
 
+#[derive(Copy, Clone)]
 pub struct TermSize {
-    width: usize,
-    height: usize,
+    pub width: usize,
+    pub height: usize,
 }
 
 pub struct Chai {
     pub writer: io::Stdout,
     pub buffers: Vec<Buffer>,
+    pub windows: Vec<TextBlock>,
     pub current_buffer_index: usize,
+    pub active_window_index: usize,
     pub window_size: TermSize,
 }
 
@@ -50,16 +56,16 @@ impl Chai {
             writer: io::stdout(),
             buffers: vec![Buffer {
                 file_path,
-                cursor: Cursor { x: 0, y: 0 },
                 dirty: false,
-                content,
-                offset: (0, 0),
+                content: content.into(),
             }],
             current_buffer_index: 0,
+            active_window_index: 0,
             window_size: TermSize {
                 width: 0,
                 height: 0,
             },
+            windows: Vec::new(),
         })
     }
 
@@ -73,9 +79,43 @@ impl Chai {
             height: size.rows as usize,
         };
 
+        let buffer = self.get_current_buffer()?;
+
+        let pointer: *const ExtendedLinkedList<Rope> = &buffer.content;
+
+        self.windows.push(TextBlock::new(
+            pointer,
+            (self.window_size.width / 2, self.window_size.height / 2),
+            (0, 0),
+            (0, 0),
+            None,
+        ));
+
+        self.windows.push(TextBlock::new(
+            pointer,
+            (self.window_size.width / 2, self.window_size.height / 2),
+            (0, 0),
+            (0, (self.window_size.height / 2).try_into()?),
+            None,
+        ));
+
+        self.windows.push(TextBlock::new(
+            pointer,
+            (self.window_size.width / 2, self.window_size.height),
+            (0, 0),
+            ((self.window_size.width / 2).try_into()?, 0),
+            None,
+        ));
+
         self.clear()?;
         self.render()?;
-        queue!(self.writer, cursor::MoveTo(0, 0))?;
+
+        let term_cursor_pos = self.get_active_window()?.get_cursor_term_pos()?;
+
+        queue!(
+            self.writer,
+            cursor::MoveTo(term_cursor_pos.0, term_cursor_pos.1)
+        )?;
         self.writer.flush()?;
 
         let result = self.run_loop();
@@ -90,15 +130,13 @@ impl Chai {
             self.clear()?;
             self.handle_event(event)?;
 
-            self.scroll()?;
-
             self.render()?;
 
-            let term_cursor_pos = self.get_term_cursor_pos()?;
+            let term_cursor_pos = self.get_active_window()?.get_cursor_term_pos()?;
 
             queue!(
                 self.writer,
-                cursor::MoveTo(term_cursor_pos.0 as u16, term_cursor_pos.1 as u16)
+                cursor::MoveTo(term_cursor_pos.0, term_cursor_pos.1)
             )?;
 
             self.writer.flush()?;
@@ -139,25 +177,26 @@ impl Chai {
         Ok(line)
     }
 
-    fn get_cursor_pos(&self) -> anyhow::Result<(usize, usize)> {
-        let buffer = self.get_current_buffer()?;
-        let raw_pos = buffer.cursor.get_pos();
-
-        let line = self.get_line_at(raw_pos.1)?;
-
-        let x = raw_pos.0.min(line.len_chars());
-
-        Ok((x, raw_pos.1))
+    fn get_active_window(&self) -> anyhow::Result<&TextBlock> {
+        self.windows
+            .get(self.active_window_index)
+            .ok_or(anyhow::anyhow!("No window found"))
     }
 
-    fn get_term_cursor_pos(&self) -> anyhow::Result<(usize, usize)> {
-        let (x, y) = self.get_cursor_pos()?;
-        let buffer = self.get_current_buffer()?;
+    fn get_active_window_mut(&mut self) -> anyhow::Result<&mut TextBlock> {
+        self.windows
+            .get_mut(self.active_window_index)
+            .ok_or(anyhow::anyhow!("No window found"))
+    }
 
-        let x = x.saturating_sub(buffer.offset.0);
-        let y = y.saturating_sub(buffer.offset.1);
+    fn get_cursor_pos(&self) -> anyhow::Result<(usize, usize)> {
+        let window = self.get_active_window()?;
+        let raw_pos = &window.cursor;
 
-        Ok((x, y))
+        let line = self.get_line_at(raw_pos.y)?;
+        let x = raw_pos.x.min(line.len_chars());
+
+        Ok((x, raw_pos.y))
     }
 
     fn clear(&mut self) -> io::Result<()> {
@@ -165,50 +204,9 @@ impl Chai {
     }
 
     fn render(&mut self) -> anyhow::Result<()> {
-        queue!(self.writer, cursor::MoveTo(0, 0))?;
-        let Some(buffer) = self.buffers.get(self.current_buffer_index) else {
-            return Ok(());
-        };
-
-        let slices = buffer
-            .content
-            .iter()
-            .skip(buffer.offset.1)
-            .map(|l| {
-                l.get_slice(
-                    buffer.offset.0..(buffer.offset.0 + self.window_size.width).min(l.len_chars()),
-                )
-                .map(|s| s.as_str().unwrap_or(""))
-            })
-            .take(self.window_size.height);
-
-        let len = slices.len();
-
-        for (i, slice) in slices.enumerate() {
-            queue!(&mut self.writer, Print(slice.unwrap_or("")))?;
-            if i < len.saturating_sub(1) {
-                queue!(&mut self.writer, Print("\n\r"))?;
-            }
+        for window in self.windows.iter_mut() {
+            window.render(&mut self.writer, self.window_size)?;
         }
-
-        Ok(())
-    }
-
-    fn scroll(&mut self) -> anyhow::Result<()> {
-        let (cursor_x, cursor_y) = self.get_cursor_pos()?;
-        let (window_width, window_height) = (self.window_size.width, self.window_size.height);
-        let buffer = self.get_current_buffer_mut()?;
-
-        // When the cursor_y - offset_y is greater than window_height - 1, add one to the offset_y
-        if cursor_y.saturating_sub(buffer.offset.1) > window_height.saturating_sub(1) {
-            buffer.offset.1 += 1;
-        }
-        // When the cursor_y - offset_y is less than 0, subtract one from the offset_y
-        if (cursor_y + 1).saturating_sub(buffer.offset.1) == 0 {
-            buffer.offset.1 = buffer.offset.1.saturating_sub(1);
-        }
-
-        buffer.offset.0 = cursor_x.saturating_sub(window_width);
 
         Ok(())
     }
@@ -235,9 +233,11 @@ impl Chai {
             Event::FocusLost => {}
             Event::Key(event) => self.handle_key(event)?,
             Event::Mouse(_event) => {}
-            Event::Paste(_data) => {}
+            Event::Paste(ref _data) => {}
             Event::Resize(_width, _height) => {}
         };
+
+        self.get_active_window_mut()?.handle_event(&event)?;
 
         Ok(())
     }
@@ -260,30 +260,6 @@ impl Chai {
             (KeyModifiers::NONE, KeyCode::Backspace) => {
                 self.delete()?;
             }
-            (KeyModifiers::NONE, KeyCode::Left) => {
-                let cursor_position = self.get_cursor_pos()?;
-
-                self.set_cursor_x(cursor_position.0.saturating_sub(1))?;
-            }
-            (KeyModifiers::NONE, KeyCode::Right) => {
-                let cursor_position = self.get_cursor_pos()?;
-                let line = self.get_line_at(cursor_position.1)?;
-
-                self.set_cursor_x((cursor_position.0 + 1).min(line.len_chars()))?;
-            }
-            (KeyModifiers::NONE, KeyCode::Up) => {
-                let cursor_position = self.get_cursor_pos()?;
-                let new_cursor_y = cursor_position.1.saturating_sub(1);
-
-                self.set_cursor_y(new_cursor_y)?;
-            }
-            (KeyModifiers::NONE, KeyCode::Down) => {
-                let cursor_position = self.get_cursor_pos()?;
-                let lines_len = self.get_current_buffer()?.content.len();
-                let new_cursor_y = (cursor_position.1 + 1).min(lines_len.saturating_sub(1));
-
-                self.set_cursor_y(new_cursor_y)?;
-            }
             _ => {}
         };
 
@@ -301,16 +277,16 @@ impl Chai {
     }
 
     fn set_cursor_y(&mut self, y: usize) -> anyhow::Result<()> {
-        let buffer = self.get_current_buffer_mut()?;
-        buffer.cursor.y = y;
+        let window = self.get_active_window_mut()?;
+        window.cursor.y = y;
 
         Ok(())
     }
 
     fn set_cursor_x(&mut self, x: usize) -> anyhow::Result<()> {
-        let buffer = self.get_current_buffer_mut()?;
+        let window = self.get_active_window_mut()?;
 
-        buffer.cursor.x = x;
+        window.cursor.x = x;
 
         Ok(())
     }
@@ -325,11 +301,12 @@ impl Chai {
             Rope::new()
         };
 
+        let window = self.get_active_window_mut()?;
+
+        window.cursor.y += 1;
+        window.cursor.x = 0;
+
         let buffer = self.get_current_buffer_mut()?;
-
-        buffer.cursor.y += 1;
-        buffer.cursor.x = 0;
-
         buffer.content.push_at(cursor_y + 1, new_line);
 
         Ok(())
@@ -388,8 +365,10 @@ impl Chai {
     }
 
     fn append_to_prev_line(&mut self) -> anyhow::Result<()> {
+        let window = self.get_active_window()?;
+        let cursor_y = window.cursor.y;
+
         let buffer = self.get_current_buffer_mut()?;
-        let cursor_y = buffer.cursor.y;
 
         if cursor_y == 0 {
             return Ok(());
