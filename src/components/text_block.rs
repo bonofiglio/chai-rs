@@ -9,10 +9,19 @@ use crossterm::{
 use ropey::Rope;
 
 use crate::{
-    chai::TermSize, core::extended_linked_list::ExtendedLinkedList, Coords, TermScreenCoords,
+    chai::TermSize,
+    core::{
+        coords::{Coords, TermScreenCoords},
+        extended_linked_list::ExtendedLinkedList,
+    },
 };
 
 use super::TUIComponent;
+
+pub enum Mode {
+    Normal,
+    Insert,
+}
 
 pub struct TextBlock {
     pub position: TermScreenCoords,
@@ -20,6 +29,7 @@ pub struct TextBlock {
     pub offset: Coords,
     pub size: Coords,
     pub cursor: Coords,
+    pub mode: Mode,
 }
 
 impl TUIComponent for TextBlock {
@@ -68,16 +78,16 @@ impl TextBlock {
     pub fn new(
         content: *const ExtendedLinkedList<Rope>,
         size: (usize, usize),
-        offset: (usize, usize),
         position: (u16, u16),
         cursor: Option<(usize, usize)>,
     ) -> TextBlock {
         TextBlock {
             content,
             size: size.into(),
-            offset: offset.into(),
+            offset: (0, 0).into(),
             position: position.into(),
             cursor: cursor.unwrap_or((0, 0)).into(),
+            mode: Mode::Normal,
         }
     }
 

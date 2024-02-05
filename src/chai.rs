@@ -10,9 +10,8 @@ use crossterm::{
 use ropey::Rope;
 
 use crate::{
-    buffer::Buffer,
     components::{text_block::TextBlock, TUIComponent},
-    core::extended_linked_list::ExtendedLinkedList,
+    core::{buffer::Buffer, extended_linked_list::ExtendedLinkedList},
 };
 use std::{
     io::{self, Write},
@@ -87,14 +86,12 @@ impl Chai {
             pointer,
             (self.window_size.width / 2, self.window_size.height / 2),
             (0, 0),
-            (0, 0),
             None,
         ));
 
         self.windows.push(TextBlock::new(
             pointer,
             (self.window_size.width / 2, self.window_size.height / 2),
-            (0, 0),
             (0, (self.window_size.height / 2).try_into()?),
             None,
         ));
@@ -102,7 +99,6 @@ impl Chai {
         self.windows.push(TextBlock::new(
             pointer,
             (self.window_size.width / 2, self.window_size.height),
-            (0, 0),
             ((self.window_size.width / 2).try_into()?, 0),
             None,
         ));
