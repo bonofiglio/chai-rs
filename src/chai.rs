@@ -10,7 +10,10 @@ use crossterm::{
 use ropey::Rope;
 
 use crate::{
-    components::{text_block::TextBlock, TUIComponent},
+    components::{
+        text_block::{TextBlock, TextBlockEvent},
+        TUIComponent,
+    },
     core::{buffer::Buffer, extended_linked_list::ExtendedLinkedList},
 };
 use std::{
@@ -78,28 +81,14 @@ impl Chai {
             height: size.rows as usize,
         };
 
-        let buffer = self.get_current_buffer()?;
+        let buffer = self.get_current_buffer_mut()?;
 
-        let pointer: *const ExtendedLinkedList<Rope> = &buffer.content;
+        let content: *const ExtendedLinkedList<Rope> = &buffer.content;
 
         self.windows.push(TextBlock::new(
-            pointer,
-            (self.window_size.width / 2, self.window_size.height / 2),
+            content,
+            (self.window_size.width, self.window_size.height),
             (0, 0),
-            None,
-        ));
-
-        self.windows.push(TextBlock::new(
-            pointer,
-            (self.window_size.width / 2, self.window_size.height / 2),
-            (0, (self.window_size.height / 2).try_into()?),
-            None,
-        ));
-
-        self.windows.push(TextBlock::new(
-            pointer,
-            (self.window_size.width / 2, self.window_size.height),
-            ((self.window_size.width / 2).try_into()?, 0),
             None,
         ));
 
@@ -233,7 +222,19 @@ impl Chai {
             Event::Resize(_width, _height) => {}
         };
 
-        self.get_active_window_mut()?.handle_event(&event)?;
+        let event = self.get_active_window_mut()?.update(&event)?;
+
+        match event {
+            Some(TextBlockEvent::Char(c)) => {
+                self.add_char(c)?;
+
+                let cursor_position = self.get_cursor_pos()?;
+                self.set_cursor_x(cursor_position.0 + 1)?;
+            }
+            Some(TextBlockEvent::NewLine) => self.new_line()?,
+            Some(TextBlockEvent::Delete) => self.delete()?,
+            None => {}
+        };
 
         Ok(())
     }
@@ -243,18 +244,6 @@ impl Chai {
             (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
                 self.restore_terminal()?;
                 exit(0);
-            }
-            (KeyModifiers::NONE, KeyCode::Char(c)) | (KeyModifiers::SHIFT, KeyCode::Char(c)) => {
-                self.add_char(c)?;
-
-                let cursor_position = self.get_cursor_pos()?;
-                self.set_cursor_x(cursor_position.0 + 1)?;
-            }
-            (KeyModifiers::NONE, KeyCode::Enter) => {
-                self.new_line()?;
-            }
-            (KeyModifiers::NONE, KeyCode::Backspace) => {
-                self.delete()?;
             }
             _ => {}
         };
