@@ -224,6 +224,45 @@ impl TextBlock {
         Some(word_end)
     }
 
+    fn get_next_word_start(&self) -> Option<usize> {
+        let line = self
+            .get_line_at(self.cursor.y)
+            .ok()?
+            .get_slice(0..)?
+            .as_str()?;
+
+        let captures = WORD_REGEX.captures_iter(line);
+        let mut captures = captures.skip_while(|c| match c.get(0) {
+            Some(capture) => capture.end() <= self.cursor.x,
+            None => false,
+        });
+
+        let capture = captures.next()?.get(0)?;
+
+        let word_end = capture.start();
+
+        if word_end == self.cursor.x {
+            return Some(captures.next()?.get(0)?.start());
+        }
+
+        Some(word_end)
+    }
+
+    fn get_first_word_start_at_line(&self, line_number: usize) -> Option<usize> {
+        let line = self
+            .get_line_at(line_number)
+            .ok()?
+            .get_slice(0..)?
+            .as_str()?;
+
+        let mut captures = WORD_REGEX.captures_iter(line);
+        let capture = captures.next()?.get(0)?;
+
+        let word_end = capture.start();
+
+        Some(word_end)
+    }
+
     fn get_last_word_start_at_line(&self, line_number: usize) -> Option<usize> {
         let line = self
             .get_line_at(line_number)
@@ -306,15 +345,38 @@ impl TextBlock {
                         self.cursor.x = word_end;
                     }
                     None => {
-                        let Some(next_word_start) =
+                        let Some(next_word_end) =
                             self.get_first_word_end_at_line(self.cursor.y + 1)
                         else {
                             return Ok(None);
                         };
 
-                        self.cursor.x = next_word_start;
+                        self.cursor.x = next_word_end;
                         self.cursor.y = self.cursor.y + 1;
                     }
+                }
+
+                None
+            }
+            (KeyModifiers::NONE, KeyCode::Char('w'), Mode::Normal) => {
+                match self.get_next_word_start() {
+                    Some(word_start) => {
+                        self.cursor.x = word_start;
+                    }
+                    None => match self.get_first_word_start_at_line(self.cursor.y + 1) {
+                        Some(next_word_start) => {
+                            self.get_first_word_start_at_line(self.cursor.y + 1);
+                            self.cursor.x = next_word_start;
+                            self.cursor.y = self.cursor.y + 1;
+                        }
+                        None => {
+                            let Some(current_word_end) = self.get_next_word_end() else {
+                                return Ok(None);
+                            };
+
+                            self.cursor.x = current_word_end;
+                        }
+                    },
                 }
 
                 None
