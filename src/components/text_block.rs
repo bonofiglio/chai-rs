@@ -24,6 +24,7 @@ static WORD_REGEX: Lazy<regex::Regex> = Lazy::new(|| regex::Regex::new(r"\w+|[^\
 pub enum Mode {
     Normal,
     Insert,
+    Command,
 }
 
 pub enum TextBlockEvent {
@@ -34,7 +35,7 @@ pub enum TextBlockEvent {
 
 pub struct TextBlock {
     pub position: TermScreenCoords,
-    pub content: *const ExtendedLinkedList<Rope>,
+    pub content: *mut ExtendedLinkedList<Rope>,
     pub offset: Coords,
     pub size: Coords,
     pub cursor: Coords,
@@ -85,7 +86,7 @@ impl TUIComponent for TextBlock {
 
 impl TextBlock {
     pub fn new(
-        content: *const ExtendedLinkedList<Rope>,
+        content: *mut ExtendedLinkedList<Rope>,
         size: (usize, usize),
         position: (u16, u16),
         cursor: Option<(usize, usize)>,
@@ -120,7 +121,7 @@ impl TextBlock {
         }
         // When the cursor_y - offset_y is less than 0 (meaning, it hit the top of the window),
         // subtract one from the offset_y
-        if (self.cursor.y as usize + 1).saturating_sub(self.offset.y) == 0 {
+        if (self.cursor.y + 1).saturating_sub(self.offset.y) == 0 {
             self.offset.y = self.offset.y.saturating_sub(1);
         }
 
@@ -131,10 +132,10 @@ impl TextBlock {
 
     pub fn get_effective_size(&self, window_size: TermSize) -> anyhow::Result<(u16, u16)> {
         let effective_width = (self.size.x + self.position.x as usize)
-            .min(window_size.width as usize)
+            .min(window_size.width)
             .saturating_sub(self.position.x as usize);
         let effective_height = (self.size.y + self.position.y as usize)
-            .min(window_size.height as usize)
+            .min(window_size.height)
             .saturating_sub(self.position.y as usize);
 
         Ok((effective_width.try_into()?, effective_height.try_into()?))
@@ -142,7 +143,7 @@ impl TextBlock {
 
     pub fn update(&mut self, event: &Event) -> anyhow::Result<Option<TextBlockEvent>> {
         Ok(match event {
-            Event::Key(event) => self.handle_key(&event)?,
+            Event::Key(event) => self.handle_key(event)?,
             Event::Paste(_data) => None,
             _ => None,
         })
@@ -152,10 +153,23 @@ impl TextBlock {
         unsafe { &*self.content }
     }
 
+    fn get_content_mut(&mut self) -> &mut ExtendedLinkedList<Rope> {
+        unsafe { &mut *self.content }
+    }
+
     fn get_line_at(&self, index: usize) -> anyhow::Result<&Rope> {
         let line = self
             .get_content()
             .get(index)
+            .ok_or(anyhow::anyhow!("No line at index {}", index))?;
+
+        Ok(line)
+    }
+
+    fn get_line_at_mut(&mut self, index: usize) -> anyhow::Result<&mut Rope> {
+        let line = self
+            .get_content_mut()
+            .get_mut(index)
             .ok_or(anyhow::anyhow!("No line at index {}", index))?;
 
         Ok(line)
@@ -308,6 +322,10 @@ impl TextBlock {
                 self.goto_line(self.cursor.y + 1);
                 None
             }
+            (_, KeyCode::Char(':'), Mode::Normal) => {
+                self.mode = Mode::Command;
+                None
+            }
 
             // Normal mode
             (KeyModifiers::NONE, KeyCode::Char('i'), Mode::Normal) => {
@@ -333,7 +351,7 @@ impl TextBlock {
                         };
 
                         self.cursor.x = prev_line_start;
-                        self.cursor.y = self.cursor.y - 1;
+                        self.cursor.y -= 1;
                     }
                 };
 
@@ -352,7 +370,7 @@ impl TextBlock {
                         };
 
                         self.cursor.x = next_word_end;
-                        self.cursor.y = self.cursor.y + 1;
+                        self.cursor.y += 1;
                     }
                 }
 
@@ -367,7 +385,7 @@ impl TextBlock {
                         Some(next_word_start) => {
                             self.get_first_word_start_at_line(self.cursor.y + 1);
                             self.cursor.x = next_word_start;
-                            self.cursor.y = self.cursor.y + 1;
+                            self.cursor.y += 1;
                         }
                         None => {
                             let Some(current_word_end) = self.get_next_word_end() else {
@@ -383,11 +401,10 @@ impl TextBlock {
             }
 
             // Insert mode
-            (KeyModifiers::NONE, KeyCode::Char(c), Mode::Insert)
-            | (KeyModifiers::SHIFT, KeyCode::Char(c), Mode::Insert) => {
+            (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char(c), Mode::Insert) => {
                 Some(TextBlockEvent::Char(c))
             }
-            (KeyModifiers::NONE, KeyCode::Esc, Mode::Insert) => {
+            (KeyModifiers::NONE, KeyCode::Esc, Mode::Insert | Mode::Command) => {
                 self.mode = Mode::Normal;
                 None
             }
@@ -395,5 +412,122 @@ impl TextBlock {
             (KeyModifiers::NONE, KeyCode::Backspace, Mode::Insert) => Some(TextBlockEvent::Delete),
             _ => None,
         })
+    }
+
+    pub fn new_line(&mut self) -> anyhow::Result<()> {
+        let (cursor_x, cursor_y) = self.get_cursor_pos()?;
+        let line = self.get_line_at_mut(cursor_y)?;
+
+        let new_line = if cursor_x < line.len_chars() {
+            line.try_split_off(cursor_x)?
+        } else {
+            Rope::new()
+        };
+
+        self.cursor.y += 1;
+        self.cursor.x = 0;
+
+        unsafe {
+            (*self.content).push_at(cursor_y + 1, new_line);
+        };
+
+        Ok(())
+    }
+
+    pub fn delete(&mut self) -> anyhow::Result<()> {
+        let (cursor_index, _) = self.get_cursor_pos()?;
+        let (cursor_x, cursor_y) = self.get_cursor_pos()?;
+
+        let (mut new_cursor_x, new_cursor_y) = self.subtract_cursor_pos()?;
+
+        if cursor_x > 0 {
+            let last_line = self.get_line_at_mut(cursor_y)?;
+            last_line.try_remove(cursor_index.saturating_sub(1)..cursor_index)?;
+        };
+
+        if new_cursor_y < cursor_y {
+            new_cursor_x = self.get_line_at(new_cursor_y)?.len_chars();
+            self.append_to_prev_line()?;
+        }
+
+        self.set_cursor_x(new_cursor_x)?;
+        self.set_cursor_y(new_cursor_y)?;
+        Ok(())
+    }
+
+    fn subtract_cursor_pos(&self) -> anyhow::Result<(usize, usize)> {
+        let mut cursor_position = self.get_cursor_pos()?;
+
+        match cursor_position {
+            (0, 0) => {}
+            (0, y) => {
+                cursor_position.0 = self
+                    .get_line_len(y.saturating_sub(1))
+                    .unwrap_or(0)
+                    .saturating_sub(1);
+                cursor_position.1 = y.saturating_sub(1);
+            }
+            (x, 0) => {
+                cursor_position.0 = x.saturating_sub(1);
+                cursor_position.1 = 0;
+            }
+            (x, y) => {
+                cursor_position.0 = x.saturating_sub(1);
+                cursor_position.1 = y;
+            }
+        };
+
+        Ok(cursor_position)
+    }
+
+    fn set_cursor_y(&mut self, y: usize) -> anyhow::Result<()> {
+        self.cursor.y = y;
+
+        Ok(())
+    }
+
+    pub fn set_cursor_x(&mut self, x: usize) -> anyhow::Result<()> {
+        self.cursor.x = x;
+
+        Ok(())
+    }
+
+    fn append_to_prev_line(&mut self) -> anyhow::Result<()> {
+        let cursor_y = self.cursor.y;
+
+        if cursor_y == 0 {
+            return Ok(());
+        }
+
+        unsafe {
+            let removed_line = (*self.content).remove_at(cursor_y).ok_or(anyhow::anyhow!(
+                "Could not remove line at index {}",
+                cursor_y
+            ))?;
+            let prev_line = self.get_line_at_mut(cursor_y.saturating_sub(1))?;
+
+            prev_line.append(removed_line);
+        };
+
+        Ok(())
+    }
+
+    pub fn get_cursor_pos(&self) -> anyhow::Result<(usize, usize)> {
+        let raw_pos = &self.cursor;
+
+        let line = self.get_line_at(raw_pos.y)?;
+        let x = raw_pos.x.min(line.len_chars());
+
+        Ok((x, raw_pos.y))
+    }
+
+    pub fn add_char(&mut self, c: char) -> anyhow::Result<()> {
+        let (cursor_index, line_index) = self.get_cursor_pos()?;
+
+        let last_line = self.get_line_at_mut(line_index)?;
+
+        last_line.try_insert_char(cursor_index, c)?;
+
+        Ok(())
     }
 }

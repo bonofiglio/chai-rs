@@ -2,6 +2,7 @@ use std::io::Stdout;
 
 use crate::chai::TermSize;
 
+pub mod editor;
 pub mod text_block;
 
 pub trait TUIComponent {

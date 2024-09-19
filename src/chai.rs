@@ -10,10 +10,7 @@ use crossterm::{
 use ropey::Rope;
 
 use crate::{
-    components::{
-        text_block::{TextBlock, TextBlockEvent},
-        TUIComponent,
-    },
+    components::{editor::Editor, TUIComponent},
     core::{buffer::Buffer, extended_linked_list::ExtendedLinkedList},
 };
 use std::{
@@ -30,7 +27,7 @@ pub struct TermSize {
 pub struct Chai {
     pub writer: io::Stdout,
     pub buffers: Vec<Buffer>,
-    pub windows: Vec<TextBlock>,
+    pub windows: Vec<Editor>,
     pub current_buffer_index: usize,
     pub active_window_index: usize,
     pub window_size: TermSize,
@@ -59,7 +56,7 @@ impl Chai {
             buffers: vec![Buffer {
                 file_path,
                 dirty: false,
-                content: content.into(),
+                content,
             }],
             current_buffer_index: 0,
             active_window_index: 0,
@@ -82,13 +79,18 @@ impl Chai {
         };
 
         let buffer = self.get_current_buffer_mut()?;
+        let content: *mut ExtendedLinkedList<_> = &mut buffer.content;
 
-        let content: *const ExtendedLinkedList<Rope> = &buffer.content;
-
-        self.windows.push(TextBlock::new(
+        self.windows.push(Editor::new(
             content,
-            (self.window_size.width, self.window_size.height),
+            (self.window_size.width / 2, self.window_size.height - 1),
             (0, 0),
+            None,
+        ));
+        self.windows.push(Editor::new(
+            content,
+            (self.window_size.width / 2, self.window_size.height - 1),
+            ((self.window_size.width / 2) as u16, 0),
             None,
         ));
 
@@ -130,58 +132,22 @@ impl Chai {
         Ok(())
     }
 
-    fn get_current_buffer(&self) -> anyhow::Result<&Buffer> {
-        self.buffers
-            .get(self.current_buffer_index)
-            .ok_or(anyhow::anyhow!("No buffer found"))
-    }
-
     fn get_current_buffer_mut(&mut self) -> anyhow::Result<&mut Buffer> {
         self.buffers
             .get_mut(self.current_buffer_index)
             .ok_or(anyhow::anyhow!("No buffer found"))
     }
 
-    fn get_line_at(&self, index: usize) -> anyhow::Result<&Rope> {
-        let buffer = self.get_current_buffer()?;
-        let line = buffer
-            .content
-            .get(index)
-            .ok_or(anyhow::anyhow!("No line at index {}", index))?;
-
-        Ok(line)
-    }
-
-    fn get_line_at_mut(&mut self, index: usize) -> anyhow::Result<&mut Rope> {
-        let buffer = self.get_current_buffer_mut()?;
-        let line = buffer
-            .content
-            .get_mut(index)
-            .ok_or(anyhow::anyhow!("No line at index {}", index))?;
-
-        Ok(line)
-    }
-
-    fn get_active_window(&self) -> anyhow::Result<&TextBlock> {
+    fn get_active_window(&self) -> anyhow::Result<&Editor> {
         self.windows
             .get(self.active_window_index)
             .ok_or(anyhow::anyhow!("No window found"))
     }
 
-    fn get_active_window_mut(&mut self) -> anyhow::Result<&mut TextBlock> {
+    fn get_active_window_mut(&mut self) -> anyhow::Result<&mut Editor> {
         self.windows
             .get_mut(self.active_window_index)
             .ok_or(anyhow::anyhow!("No window found"))
-    }
-
-    fn get_cursor_pos(&self) -> anyhow::Result<(usize, usize)> {
-        let window = self.get_active_window()?;
-        let raw_pos = &window.cursor;
-
-        let line = self.get_line_at(raw_pos.y)?;
-        let x = raw_pos.x.min(line.len_chars());
-
-        Ok((x, raw_pos.y))
     }
 
     fn clear(&mut self) -> io::Result<()> {
@@ -222,150 +188,14 @@ impl Chai {
             Event::Resize(_width, _height) => {}
         };
 
-        let event = self.get_active_window_mut()?.update(&event)?;
-
-        match event {
-            Some(TextBlockEvent::Char(c)) => {
-                self.add_char(c)?;
-
-                let cursor_position = self.get_cursor_pos()?;
-                self.set_cursor_x(cursor_position.0 + 1)?;
-            }
-            Some(TextBlockEvent::NewLine) => self.new_line()?,
-            Some(TextBlockEvent::Delete) => self.delete()?,
-            None => {}
-        };
-
-        Ok(())
+        self.get_active_window_mut()?.update(&event)
     }
 
     fn handle_key(&mut self, event: KeyEvent) -> anyhow::Result<()> {
-        match (event.modifiers, event.code) {
-            (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
-                self.restore_terminal()?;
-                exit(0);
-            }
-            _ => {}
+        if let (KeyModifiers::CONTROL, KeyCode::Char('c')) = (event.modifiers, event.code) {
+            self.restore_terminal()?;
+            exit(0);
         };
-
-        Ok(())
-    }
-
-    fn add_char(&mut self, c: char) -> anyhow::Result<()> {
-        let (cursor_index, line_index) = self.get_cursor_pos()?;
-
-        let last_line = self.get_line_at_mut(line_index)?;
-
-        last_line.try_insert_char(cursor_index, c)?;
-
-        Ok(())
-    }
-
-    fn set_cursor_y(&mut self, y: usize) -> anyhow::Result<()> {
-        let window = self.get_active_window_mut()?;
-        window.cursor.y = y;
-
-        Ok(())
-    }
-
-    fn set_cursor_x(&mut self, x: usize) -> anyhow::Result<()> {
-        let window = self.get_active_window_mut()?;
-
-        window.cursor.x = x;
-
-        Ok(())
-    }
-
-    fn new_line(&mut self) -> anyhow::Result<()> {
-        let (cursor_x, cursor_y) = self.get_cursor_pos()?;
-        let line = self.get_line_at_mut(cursor_y)?;
-
-        let new_line = if cursor_x < line.len_chars() {
-            line.try_split_off(cursor_x)?
-        } else {
-            Rope::new()
-        };
-
-        let window = self.get_active_window_mut()?;
-
-        window.cursor.y += 1;
-        window.cursor.x = 0;
-
-        let buffer = self.get_current_buffer_mut()?;
-        buffer.content.push_at(cursor_y + 1, new_line);
-
-        Ok(())
-    }
-
-    fn delete(&mut self) -> anyhow::Result<()> {
-        let (cursor_index, _) = self.get_cursor_pos()?;
-        let (cursor_x, cursor_y) = self.get_cursor_pos()?;
-
-        let (mut new_cursor_x, new_cursor_y) = self.subtract_cursor_pos()?;
-
-        if cursor_x > 0 {
-            let last_line = self.get_line_at_mut(cursor_y)?;
-            last_line.try_remove(cursor_index.saturating_sub(1)..cursor_index)?;
-        };
-
-        if new_cursor_y < cursor_y {
-            new_cursor_x = self.get_line_at(new_cursor_y)?.len_chars();
-            self.append_to_prev_line()?;
-        }
-
-        self.set_cursor_x(new_cursor_x)?;
-        self.set_cursor_y(new_cursor_y)?;
-        Ok(())
-    }
-
-    fn subtract_cursor_pos(&self) -> anyhow::Result<(usize, usize)> {
-        let mut cursor_position = self.get_cursor_pos()?;
-
-        match cursor_position {
-            (0, 0) => {}
-            (0, y) => {
-                cursor_position.0 = self
-                    .get_line_len(y.saturating_sub(1))
-                    .unwrap_or(0)
-                    .saturating_sub(1);
-                cursor_position.1 = y.saturating_sub(1);
-            }
-            (x, 0) => {
-                cursor_position.0 = x.saturating_sub(1);
-                cursor_position.1 = 0;
-            }
-            (x, y) => {
-                cursor_position.0 = x.saturating_sub(1);
-                cursor_position.1 = y;
-            }
-        };
-
-        Ok(cursor_position)
-    }
-
-    fn get_line_len(&self, index: usize) -> anyhow::Result<usize> {
-        let line = self.get_line_at(index)?;
-
-        Ok(line.len_chars())
-    }
-
-    fn append_to_prev_line(&mut self) -> anyhow::Result<()> {
-        let window = self.get_active_window()?;
-        let cursor_y = window.cursor.y;
-
-        let buffer = self.get_current_buffer_mut()?;
-
-        if cursor_y == 0 {
-            return Ok(());
-        }
-
-        let removed_line = buffer.content.remove_at(cursor_y).ok_or(anyhow::anyhow!(
-            "Could not remove line at index {}",
-            cursor_y
-        ))?;
-        let prev_line = self.get_line_at_mut(cursor_y.saturating_sub(1))?;
-
-        prev_line.append(removed_line);
 
         Ok(())
     }
