@@ -1,4 +1,4 @@
-use std::io::Stdout;
+use std::{cmp::min, io::Stdout};
 
 use crossterm::{
     cursor::{self},
@@ -105,7 +105,10 @@ impl TextBlock {
         let x = self.cursor.x.saturating_sub(self.offset.x) + self.position.x as usize;
         let y = self.cursor.y.saturating_sub(self.offset.y) + self.position.y as usize;
 
-        let line_len = self.get_line_len(self.cursor.y)? + self.position.x as usize;
+        let line_len = self
+            .get_line_len(self.cursor.y)?
+            .saturating_sub(self.offset.x)
+            + self.position.x as usize;
 
         let x = x.min(line_len);
 
@@ -125,7 +128,16 @@ impl TextBlock {
             self.offset.y = self.offset.y.saturating_sub(1);
         }
 
-        self.offset.x = self.cursor.x.saturating_sub(window_width as usize);
+        let current_line = self.get_line_at(self.cursor.y)?;
+
+        let offset_cursor = self.cursor.x.saturating_sub(window_width as usize);
+        let offset_current_line = current_line
+            .len_chars()
+            .saturating_sub(window_width as usize);
+
+        // When the cursor x is greater than the current line length, scroll the TextBlock back to
+        // the minimum to show as most of the current line as possible
+        self.offset.x = min(offset_cursor, offset_current_line);
 
         Ok(())
     }
