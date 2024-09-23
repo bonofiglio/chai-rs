@@ -1,12 +1,14 @@
 use crossterm::{
     cursor,
-    event::{read, Event, KeyCode, KeyEvent, KeyModifiers},
+    event::{Event, KeyCode, KeyEvent, KeyModifiers},
     execute, queue,
     terminal::{
         disable_raw_mode, enable_raw_mode, window_size, Clear, ClearType, EnterAlternateScreen,
         LeaveAlternateScreen,
     },
 };
+use futures_core::Stream;
+use futures_util::StreamExt;
 use ropey::Rope;
 
 use crate::{
@@ -68,7 +70,10 @@ impl Chai {
         })
     }
 
-    pub fn start(mut self) -> anyhow::Result<()> {
+    pub async fn start<S>(mut self, read_stream: &mut S) -> anyhow::Result<()>
+    where
+        S: Stream<Item = std::io::Result<crossterm::event::Event>> + Unpin,
+    {
         self.setup_terminal()?;
 
         let size = window_size()?;
@@ -105,15 +110,24 @@ impl Chai {
         )?;
         self.writer.flush()?;
 
-        let result = self.run_loop();
+        let result = self.run_loop(read_stream).await;
 
         self.restore_terminal()?;
 
         result
     }
 
-    fn run_loop(&mut self) -> anyhow::Result<()> {
-        while let Ok(event) = read() {
+    async fn run_loop<S>(&mut self, read_stream: &mut S) -> anyhow::Result<()>
+    where
+        S: Stream<Item = std::io::Result<crossterm::event::Event>> + Unpin,
+    {
+        while !self.should_close() {
+            let Some(event) = read_stream.next().await else {
+                continue;
+            };
+
+            let event = event?;
+
             self.clear()?;
             self.handle_event(event)?;
 
@@ -198,5 +212,9 @@ impl Chai {
         };
 
         Ok(())
+    }
+
+    fn should_close(&self) -> bool {
+        self.windows.is_empty()
     }
 }
