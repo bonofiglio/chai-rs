@@ -1,4 +1,5 @@
-use crossterm::event::EventStream;
+use chai::TermSize;
+use crossterm::{event::EventStream, terminal::window_size};
 
 mod chai;
 mod components;
@@ -6,9 +7,16 @@ mod core;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let file_path = std::env::args().nth(1).map(String::into_boxed_str);
+    let file_path = std::env::args().nth(1);
+    let size = window_size()?;
 
-    chai::Chai::new(file_path)?
+    let size = TermSize {
+        width: size.width,
+        height: size.height,
+    };
+
+    chai::Chai::new(file_path, size)
+        .await?
         .start(&mut EventStream::new())
         .await
 }

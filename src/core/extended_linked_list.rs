@@ -3,6 +3,7 @@ use std::{
     ops::{Deref, DerefMut},
 };
 
+#[derive(Clone, Default)]
 pub struct ExtendedLinkedList<T>(LinkedList<T>);
 
 impl<T> Deref for ExtendedLinkedList<T> {

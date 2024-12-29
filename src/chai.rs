@@ -9,11 +9,10 @@ use crossterm::{
 };
 use futures_core::Stream;
 use futures_util::StreamExt;
-use ropey::Rope;
 
 use crate::{
-    components::{editor::Editor, TUIComponent},
-    core::{buffer::Buffer, extended_linked_list::ExtendedLinkedList},
+    components::Pane,
+    core::{document::Document, TermScreenCoords},
 };
 use std::{
     io::{self, Write},
@@ -22,17 +21,16 @@ use std::{
 
 #[derive(Copy, Clone)]
 pub struct TermSize {
-    pub width: usize,
-    pub height: usize,
+    pub width: u16,
+    pub height: u16,
 }
 
 pub struct Chai {
     pub writer: io::Stdout,
-    pub buffers: Vec<Buffer>,
-    pub windows: Vec<Editor>,
-    pub current_buffer_index: usize,
-    pub active_window_index: usize,
+    pub panes: Vec<Pane>,
+    pub active_pane_index: usize,
     pub window_size: TermSize,
+    pub documents: Vec<Document>,
 }
 
 impl Drop for Chai {
@@ -42,32 +40,28 @@ impl Drop for Chai {
 }
 
 impl Chai {
-    pub fn new(file_path: Option<Box<str>>) -> anyhow::Result<Self> {
-        let content = match file_path {
-            Some(ref path) => ExtendedLinkedList::from_vec(
-                String::from_utf8(std::fs::read(path.as_ref())?)?
-                    .lines()
-                    .map(Rope::from)
-                    .collect::<Vec<_>>(),
-            ),
-            None => ExtendedLinkedList::from([Rope::new()]),
+    pub async fn new(file_path: Option<String>, window_size: TermSize) -> anyhow::Result<Self> {
+        let default_doc = Document::new(file_path).await?;
+        let default_content = default_doc.get_content().clone();
+        let documents = vec![default_doc];
+
+        let editor = Chai {
+            writer: io::stdout(),
+            active_pane_index: 0,
+            window_size,
+            panes: vec![Pane::new(
+                default_content,
+                TermSize {
+                    width: window_size.width,
+                    height: window_size.height - 1,
+                },
+                TermScreenCoords { x: 0, y: 0 },
+                None,
+            )],
+            documents,
         };
 
-        Ok(Chai {
-            writer: io::stdout(),
-            buffers: vec![Buffer {
-                file_path,
-                dirty: false,
-                content,
-            }],
-            current_buffer_index: 0,
-            active_window_index: 0,
-            window_size: TermSize {
-                width: 0,
-                height: 0,
-            },
-            windows: Vec::new(),
-        })
+        Ok(editor)
     }
 
     pub async fn start<S>(mut self, read_stream: &mut S) -> anyhow::Result<()>
@@ -79,34 +73,21 @@ impl Chai {
         let size = window_size()?;
 
         self.window_size = TermSize {
-            width: (size.columns as usize).saturating_sub(1),
-            height: size.rows as usize,
+            width: size.columns.saturating_sub(1),
+            height: size.rows,
         };
-
-        let buffer = self.get_current_buffer_mut()?;
-        let content: *mut ExtendedLinkedList<_> = &mut buffer.content;
-
-        self.windows.push(Editor::new(
-            content,
-            (self.window_size.width / 2, self.window_size.height - 1),
-            (0, 0),
-            None,
-        ));
-        self.windows.push(Editor::new(
-            content,
-            (self.window_size.width / 2, self.window_size.height - 1),
-            ((self.window_size.width / 2) as u16, 0),
-            None,
-        ));
 
         self.clear()?;
         self.render()?;
 
-        let term_cursor_pos = self.get_active_window()?.get_cursor_term_pos()?;
+        let term_cursor_pos = self
+            .get_active_pane()?
+            .get_active_view()?
+            .get_cursor_term_pos()?;
 
         queue!(
             self.writer,
-            cursor::MoveTo(term_cursor_pos.0, term_cursor_pos.1)
+            cursor::MoveTo(term_cursor_pos.x, term_cursor_pos.y)
         )?;
         self.writer.flush()?;
 
@@ -133,11 +114,14 @@ impl Chai {
 
             self.render()?;
 
-            let term_cursor_pos = self.get_active_window()?.get_cursor_term_pos()?;
+            let term_cursor_pos = self
+                .get_active_pane()?
+                .get_active_view()?
+                .get_cursor_term_pos()?;
 
             queue!(
                 self.writer,
-                cursor::MoveTo(term_cursor_pos.0, term_cursor_pos.1)
+                cursor::MoveTo(term_cursor_pos.x, term_cursor_pos.y)
             )?;
 
             self.writer.flush()?;
@@ -146,22 +130,16 @@ impl Chai {
         Ok(())
     }
 
-    fn get_current_buffer_mut(&mut self) -> anyhow::Result<&mut Buffer> {
-        self.buffers
-            .get_mut(self.current_buffer_index)
-            .ok_or(anyhow::anyhow!("No buffer found"))
+    fn get_active_pane(&self) -> anyhow::Result<&Pane> {
+        self.panes
+            .get(self.active_pane_index)
+            .ok_or(anyhow::anyhow!("No pane found"))
     }
 
-    fn get_active_window(&self) -> anyhow::Result<&Editor> {
-        self.windows
-            .get(self.active_window_index)
-            .ok_or(anyhow::anyhow!("No window found"))
-    }
-
-    fn get_active_window_mut(&mut self) -> anyhow::Result<&mut Editor> {
-        self.windows
-            .get_mut(self.active_window_index)
-            .ok_or(anyhow::anyhow!("No window found"))
+    fn get_current_pane_mut(&mut self) -> anyhow::Result<&mut Pane> {
+        self.panes
+            .get_mut(self.active_pane_index)
+            .ok_or(anyhow::anyhow!("No pane found"))
     }
 
     fn clear(&mut self) -> io::Result<()> {
@@ -169,7 +147,7 @@ impl Chai {
     }
 
     fn render(&mut self) -> anyhow::Result<()> {
-        for window in self.windows.iter_mut() {
+        for window in self.panes.iter_mut() {
             window.render(&mut self.writer, self.window_size)?;
         }
 
@@ -202,7 +180,11 @@ impl Chai {
             Event::Resize(_width, _height) => {}
         };
 
-        self.get_active_window_mut()?.update(&event)
+        let view = self.get_current_pane_mut()?.get_current_view_mut()?;
+
+        self.documents.first_mut().unwrap().content = view.update(&event)?;
+
+        Ok(())
     }
 
     fn handle_key(&mut self, event: KeyEvent) -> anyhow::Result<()> {
@@ -215,6 +197,6 @@ impl Chai {
     }
 
     fn should_close(&self) -> bool {
-        self.windows.is_empty()
+        self.panes.is_empty()
     }
 }
